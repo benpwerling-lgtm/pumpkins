@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#17351f">
+<title>Pumpkin Voice Logger</title>
+<style>
+body{font-family:system-ui,-apple-system,sans-serif;margin:0;background:#f4f6f3;color:#17221a}
+main{max-width:760px;margin:auto;padding:16px}
+.card{background:#fff;border:1px solid #d7ddd8;border-radius:16px;padding:16px;margin:12px 0}
+h1{margin:4px 0}.sub{color:#5a685f;margin-top:4px}.big{font-size:2rem;font-weight:800}
+.status{font-size:1.2rem;font-weight:750}.listening{color:#176b35}.speaking{color:#805e00}.stopped{color:#8a2828}
+.row{display:flex;gap:10px;flex-wrap:wrap}
+button{border:0;border-radius:12px;padding:13px 16px;font-size:1rem;font-weight:700;background:#e2e8e3;color:#17221a}
+.primary{background:#1d6338;color:white;flex:1}.danger{background:#f3dddd;color:#7b1f1f}
+.heard{font-family:monospace;background:#eef2ee;padding:10px;border-radius:10px;min-height:1.4em}
+.warn{background:#fff3d4;border:1px solid #e8cd7c;padding:10px;border-radius:10px;margin-top:10px}
+.ok{background:#e4f4e8;border:1px solid #a4d0af;padding:10px;border-radius:10px;margin-top:10px}
+table{width:100%;border-collapse:collapse}th,td{padding:7px;border-bottom:1px solid #e5e9e5;text-align:right}th:first-child,td:first-child{text-align:left}
+input{font:inherit;padding:8px;width:80px}
+@media(prefers-color-scheme:dark){body{background:#111713;color:#eef3ef}.card{background:#1b241e;border-color:#344238}.sub{color:#aab5ad}button{background:#344238;color:#eef3ef}.primary{background:#2c7a49}.heard{background:#111713}input{background:#111713;color:white}}
+</style>
+</head>
+<body><main>
+<h1>Pumpkin Voice Logger</h1>
+<p class="sub">Hands-free plot → width → depth with spoken read-back.</p>
+<section class="card">
+<div id="status" class="status stopped">Stopped</div>
+<div id="plot" class="big">Say “plot 101”</div>
+<div id="next">Waiting for a plot number.</div>
+<p>Last heard:</p><div id="heard" class="heard">—</div><div id="notice"></div>
+</section>
+<section class="card"><div class="row">
+<button id="start" class="primary">Start hands-free</button>
+<button id="pause" disabled>Pause</button>
+<button id="undo">Undo last</button>
+<button id="end">End plot</button>
+</div></section>
+<section class="card">
+<b>Say:</b> “Plot 101” · one measurement at a time · “Undo” · “Repeat” · “Status” · “End plot”
+<p>Safety range (cm): <input id="min" type="number" step=".1" value="5"> to <input id="max" type="number" step=".1" value="100"></p>
+</section>
+<section class="card">
+<div class="row"><button id="export">Export CSV</button><button id="clear" class="danger">Clear all data</button></div>
+<p id="summary"></p>
+<div style="overflow:auto;max-height:340px"><table><thead><tr><th>Plot</th><th>Pumpkin</th><th>Width</th><th>Depth</th></tr></thead><tbody id="rows"></tbody></table></div>
+</section>
+</main>
+<script>
+(()=>{
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+const $=id=>document.getElementById(id);
+let data=JSON.parse(localStorage.getItem("pvl_data")||"[]");
+let plot=localStorage.getItem("pvl_plot")||null;
+let rec=null,wanted=false,speaking=false,last=null,restarting=false;
+const pdat=()=>data.filter(x=>String(x.plot)===String(plot));
+const kind=()=>pdat().length%2===0?"width":"depth";
+const pumpkin=()=>Math.floor(pdat().length/2)+1;
+function save(){localStorage.setItem("pvl_data",JSON.stringify(data));plot?localStorage.setItem("pvl_plot",plot):localStorage.removeItem("pvl_plot");render()}
+function render(){
+ $("plot").textContent=plot?"Plot "+plot:"Say “plot 101”";
+ $("next").textContent=plot?"Pumpkin "+pumpkin()+": say "+kind()+".":"Waiting for a plot number.";
+ let out=[],plots=[...new Set(data.map(x=>String(x.plot)))];
+ for(const p of plots){let a=data.filter(x=>String(x.plot)===p);for(let i=0;i<a.length;i+=2)out.push({p,n:i/2+1,w:a[i]?.v??"",d:a[i+1]?.v??""})}
+ $("rows").innerHTML=out.slice().reverse().map(r=>"<tr><td>"+r.p+"</td><td>"+r.n+"</td><td>"+r.w+"</td><td>"+r.d+"</td></tr>").join("");
+ $("summary").textContent=out.filter(r=>r.w!==""&&r.d!=="").length+" complete pumpkins saved on this phone.";
+}
+function stat(t,c){$("status").textContent=t;$("status").className="status "+c}
+function notice(t,c=""){let e=$("notice");e.textContent=t;e.className=c}
+function stopRec(){if(rec){try{rec.abort()}catch{}rec=null}}
+function restart(ms=250){if(!wanted||speaking||restarting)return;restarting=true;setTimeout(()=>{restarting=false;if(wanted&&!speaking&&!rec)listen()},ms)}
+function speak(t){
+ if(!("speechSynthesis"in window)){restart();return}
+ speaking=true;stat("Speaking back…","speaking");stopRec();speechSynthesis.cancel();
+ let u=new SpeechSynthesisUtterance(t);u.rate=1;
+ u.onend=u.onerror=()=>{speaking=false;restart()};
+ speechSynthesis.speak(u);
+}
+function listen(){
+ if(!SR){wanted=false;stat("Speech recognition unavailable","stopped");notice("Use Chrome on Android or Safari on iPhone.","warn");return}
+ let r=new SR();rec=r;r.lang="en-US";r.continuous=false;r.interimResults=false;r.maxAlternatives=1;
+ r.onstart=()=>{stat("Listening…","listening");notice("")};
+ r.onresult=e=>{let t=e.results?.[0]?.[0]?.transcript?.trim()||"";$("heard").textContent=t||"—";handle(t)};
+ r.onerror=e=>{if(e.error==="not-allowed"||e.error==="service-not-allowed"){wanted=false;stat("Microphone blocked","stopped");notice("Allow microphone/speech recognition, then Start again.","warn")}else if(e.error!=="no-speech"&&e.error!=="aborted")notice("Recognition error: "+e.error+". Retrying…","warn")};
+ r.onend=()=>{if(rec===r)rec=null;if(wanted&&!speaking)restart(300)};
+ try{r.start()}catch{rec=null;restart(500)}
+}
+function nums(s){
+ s=s.toLowerCase().replace(/,/g," ").replace(/\b(cm|centimeters?|centimetres?)\b/g," ").trim();
+ let m=[...s.matchAll(/\d+(?:\.\d+)?/g)].map(x=>Number(x[0]));
+ if(m.length)return m;
+ const o={zero:0,oh:0,one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10,eleven:11,twelve:12,thirteen:13,fourteen:14,fifteen:15,sixteen:16,seventeen:17,eighteen:18,nineteen:19};
+ const te={twenty:20,thirty:30,forty:40,fifty:50,sixty:60,seventy:70,eighty:80,ninety:90};
+ function intpart(q){let a=q.trim().split(/\s+/).filter(x=>x&&x!=="and");if(!a.length)return null;if(a.length>1&&a.every(x=>x in o&&o[x]<10))return Number(a.map(x=>o[x]).join(""));let v=0;for(const x of a){if(x in o)v+=o[x];else if(x in te)v+=te[x];else if(x==="hundred")v=(v||1)*100;else return null}return v}
+ let parts=s.split(/\b(?:point|dot)\b/);if(parts.length===2){let a=intpart(parts[0]),b=parts[1].trim().split(/\s+/).map(x=>x in o?o[x]:/^\d+$/.test(x)?x:null);if(a!==null&&b.every(x=>x!==null))return[Number(a+"."+b.join(""))]}
+ let v=intpart(s);return v===null?[]:[v];
+}
+function handle(raw){
+ let t=raw.toLowerCase().trim();if(!t)return restart();
+ if(/\b(undo|go back|delete last|scratch that)\b/.test(t))return undo(true);
+ if(/\b(repeat|say again|what did you hear)\b/.test(t))return speak(last?"Last value "+last+".":"No measurement yet.");
+ if(/\b(status|where am i|where are we)\b/.test(t))return speak(plot?"Plot "+plot+". Pumpkin "+pumpkin()+". Next "+kind()+".":"No active plot.");
+ if(/\b(end plot|finish plot|done plot|plot done)\b/.test(t))return endplot(true);
+ if(/\bplot\b/.test(t)){let a=nums(t.replace(/\bplot\b/g," "));if(a.length!==1)return speak("Plot number not understood.");return switchplot(String(Math.round(a[0])))}
+ if(!plot){let a=nums(t);if(a.length===1&&Number.isInteger(a[0]))return switchplot(String(a[0]));return speak("Say plot, then the plot number.")}
+ let a=nums(t);if(a.length!==1)return speak("One number at a time. Say it again.");accept(a[0]);
+}
+function switchplot(p){
+ if(plot&&pdat().length%2===1&&String(plot)!==p)return speak("Cannot change plots. Plot "+plot+" still needs a depth.");
+ plot=p;last=null;save();speak("Plot "+p+". Pumpkin "+pumpkin()+", "+kind()+".");
+}
+function accept(v){
+ v=Math.round(Number(v)*10)/10;let lo=Number($("min").value),hi=Number($("max").value);
+ if(!Number.isFinite(v))return speak("Number not understood.");
+ if(v<lo||v>hi){notice("Rejected "+v+" cm: outside "+lo+"–"+hi+".","warn");return speak("I heard "+String(v).replace("."," point ")+". Outside range. Say it again.")}
+ let k=kind(),n=pumpkin();data.push({plot:String(plot),v,ts:Date.now()});last=v;save();notice("Saved plot "+plot+", pumpkin "+n+", "+k+" "+v+" cm.","ok");speak(String(v).replace("."," point "));
+}
+function undo(voice=false){if(!plot)return voice?speak("Nothing to undo."):null;for(let i=data.length-1;i>=0;i--){if(String(data[i].plot)===String(plot)){let x=data.splice(i,1)[0];last=null;save();notice("Removed "+x.v+" cm.","warn");if(voice)speak("Removed "+String(x.v).replace("."," point ")+". Next "+kind()+".");return}}if(voice)speak("Nothing to undo.")}
+function endplot(voice=false){if(!plot)return voice?speak("No active plot."):null;let n=pdat().length;if(n%2===1){notice("Cannot end: current pumpkin still needs depth.","warn");return voice?speak("Cannot end plot. Current pumpkin still needs depth."):null}let p=plot,c=n/2;plot=null;last=null;save();notice("Plot "+p+" complete: "+c+" pumpkins.","ok");if(voice)speak("Plot "+p+" complete. "+c+" pumpkins. Say next plot number.")}
+$("start").onclick=()=>{wanted=true;$("start").disabled=true;$("pause").disabled=false;speak(plot?"Ready. Plot "+plot+". Say "+kind()+".":"Ready. Say plot number.")};
+$("pause").onclick=()=>{wanted=false;speechSynthesis.cancel();speaking=false;stopRec();stat("Paused","stopped");$("start").disabled=false;$("pause").disabled=true};
+$("undo").onclick=()=>undo(false);$("end").onclick=()=>endplot(false);
+$("export").onclick=()=>{let rows=[["plot","pumpkin","width_cm","depth_cm"]],plots=[...new Set(data.map(x=>String(x.plot)))];for(const p of plots){let a=data.filter(x=>String(x.plot)===p);for(let i=0;i<a.length;i+=2)rows.push([p,i/2+1,a[i]?.v??"",a[i+1]?.v??""])}let csv=rows.map(r=>r.join(",")).join("\n"),u=URL.createObjectURL(new Blob([csv],{type:"text/csv"})),a=document.createElement("a");a.href=u;a.download="pumpkin_measurements.csv";a.click();setTimeout(()=>URL.revokeObjectURL(u),1000)};
+$("clear").onclick=()=>{if(confirm("Delete ALL saved measurements on this phone?")){data=[];plot=null;last=null;save()}};
+render();
+})();
+</script></body></html>
